@@ -41,6 +41,10 @@ while (true) {
 }
 ```
 
+# showcase
+
+![image](img/image.png)
+
 ## what you get
 
 - buttons, toggles, sliders, progress bars, labels, separators
