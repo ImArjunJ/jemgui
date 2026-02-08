@@ -43,7 +43,7 @@ while (true) {
 
 # showcase
 
-![image](img/image.png)
+<img src="img/image.png" alt="image" width="400">
 
 ## what you get
 
