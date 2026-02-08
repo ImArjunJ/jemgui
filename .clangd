@@ -1,0 +1,14 @@
+CompileFlags:
+  Compiler: clang++
+  Remove:
+    - -mno-unaligned-access
+    - -specs=*
+  Add:
+    - --target=arm-none-eabi
+    - -isystem/usr/arm-none-eabi/include/c++/14.2.0
+    - -isystem/usr/arm-none-eabi/include/c++/14.2.0/arm-none-eabi/thumb/v7e-m+fp/hard
+    - -isystem/usr/lib/gcc/arm-none-eabi/14.2.0/include
+    - -isystem/usr/arm-none-eabi/include
+
+Diagnostics:
+  UnusedIncludes: None

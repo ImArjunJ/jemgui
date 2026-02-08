@@ -1,0 +1,10 @@
+build/
+.cache/
+compile_commands.json
+*.bin
+*.elf
+*.map
+*.o
+*.d
+*.markdown
+ref/
