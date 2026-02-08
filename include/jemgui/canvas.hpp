@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <jemgui/color.hpp>
 #include <jemgui/types.hpp>
 
 namespace jemgui {
@@ -32,6 +33,8 @@ class canvas {
     w_ = display_.width();
     h_ = display_.height();
     has_clip_ = false;
+    dirty_y0_ = 0;
+    dirty_y1_ = -1;
     fill_screen(0x0000);
   }
 
@@ -59,14 +62,15 @@ class canvas {
       count -= 8;
     }
     while (count--) *dst++ = word;
-    dirty_ = true;
+    dirty_y0_ = 0;
+    dirty_y1_ = static_cast<i16>(h_ - 1);
   }
 
   void pixel(i16 x, i16 y, u16 color) {
     if (static_cast<u16>(x) < w_ && static_cast<u16>(y) < h_) {
       if (has_clip_ && !clip_.contains({x, y})) return;
       buf_[y * w_ + x] = color;
-      dirty_ = true;
+      mark_dirty(y, y);
     }
   }
 
@@ -81,6 +85,7 @@ class canvas {
       if (x1 >= clip_.right()) x1 = static_cast<i16>(clip_.right() - 1);
     }
     if (x0 > x1) return;
+    mark_dirty(y, y);
     u16* p = buf_ + y * w_ + x0;
     i16 n = static_cast<i16>(x1 - x0 + 1);
     if (n >= 4) {
@@ -105,7 +110,6 @@ class canvas {
     } else {
       while (n--) *p++ = color;
     }
-    dirty_ = true;
   }
 
   void vline(i16 x, i16 y, i16 vh, u16 color) {
@@ -119,13 +123,13 @@ class canvas {
       if (y1 >= clip_.bottom()) y1 = static_cast<i16>(clip_.bottom() - 1);
     }
     if (y0 > y1) return;
+    mark_dirty(y0, y1);
     u16* p = buf_ + y0 * w_ + x;
     i16 n = static_cast<i16>(y1 - y0 + 1);
     while (n--) {
       *p = color;
       p += w_;
     }
-    dirty_ = true;
   }
 
   void fill_rect(i16 x, i16 y, i16 w, i16 h, u16 color) {
@@ -186,26 +190,90 @@ class canvas {
   }
 
   void flush() {
-    if (dirty_) {
-      display_.blit(0, 0, w_, h_, buf_);
-      dirty_ = false;
+    if (dirty_y0_ <= dirty_y1_) {
+      u16 band_h = static_cast<u16>(dirty_y1_ - dirty_y0_ + 1);
+      display_.blit(0, static_cast<u16>(dirty_y0_), w_, band_h,
+                    buf_ + dirty_y0_ * w_);
+      dirty_y0_ = static_cast<i16>(h_);
+      dirty_y1_ = -1;
     }
   }
 
  private:
+  bool font_bit(char c, u8 col, u8 row) const {
+    if (c < 32 || c > 126 || col >= 5 || row >= 8) return false;
+    return (font_[(c - 32) * 5 + col] >> row) & 1;
+  }
+
   void draw_glyph(i16 x, i16 y, char c, u16 fg, u8 sz) {
     if (c < 32 || c > 126) return;
+    if (sz == 1) {
+      for (u8 i = 0; i < 5; i++) {
+        u8 line = font_[(c - 32) * 5 + i];
+        for (u8 j = 0; j < 8; j++) {
+          if (line & 0x01)
+            pixel(static_cast<i16>(x + i), static_cast<i16>(y + j), fg);
+          line >>= 1;
+        }
+      }
+      return;
+    }
+
     for (u8 i = 0; i < 5; i++) {
       u8 line = font_[(c - 32) * 5 + i];
       for (u8 j = 0; j < 8; j++) {
         if (line & 0x01) {
-          if (sz == 1)
-            pixel(static_cast<i16>(x + i), static_cast<i16>(y + j), fg);
-          else
-            fill_rect(static_cast<i16>(x + i * sz),
-                      static_cast<i16>(y + j * sz), sz, sz, fg);
+          fill_rect(static_cast<i16>(x + i * sz), static_cast<i16>(y + j * sz),
+                    sz, sz, fg);
         }
         line >>= 1;
+      }
+    }
+
+    if (sz < 2) return;
+    for (u8 i = 0; i < 5; i++) {
+      for (u8 j = 0; j < 8; j++) {
+        bool me = font_bit(c, i, j);
+        if (me) continue;
+
+        bool left = font_bit(c, static_cast<u8>(i - 1), j);
+        bool right = font_bit(c, static_cast<u8>(i + 1), j);
+        bool up = font_bit(c, i, static_cast<u8>(j - 1));
+        bool down = font_bit(c, i, static_cast<u8>(j + 1));
+
+        if (!left && !right && !up && !down) continue;
+
+        i16 bx = static_cast<i16>(x + i * sz);
+        i16 by = static_cast<i16>(y + j * sz);
+
+        auto read_bg = [&](i16 px, i16 py) -> u16 {
+          if (static_cast<u16>(px) < w_ && static_cast<u16>(py) < h_)
+            return buf_[py * w_ + px];
+          return 0;
+        };
+
+        if (left && !right) {
+          u16 bg = read_bg(bx, by);
+          u16 blend = blend_rgb565(fg, bg, 80);
+          pixel(bx, by, blend);
+        }
+        if (right && !left) {
+          i16 ex = static_cast<i16>(bx + sz - 1);
+          u16 bg = read_bg(ex, by);
+          u16 blend = blend_rgb565(fg, bg, 80);
+          pixel(ex, by, blend);
+        }
+        if (up && !down) {
+          u16 bg = read_bg(bx, by);
+          u16 blend = blend_rgb565(fg, bg, 80);
+          pixel(bx, by, blend);
+        }
+        if (down && !up) {
+          i16 ey = static_cast<i16>(by + sz - 1);
+          u16 bg = read_bg(bx, ey);
+          u16 blend = blend_rgb565(fg, bg, 80);
+          pixel(bx, ey, blend);
+        }
       }
     }
   }
@@ -266,11 +334,17 @@ class canvas {
   rect clip_ = {};
   bool has_clip_ = false;
 
+  void mark_dirty(i16 y0, i16 y1) {
+    if (y0 < dirty_y0_) dirty_y0_ = y0;
+    if (y1 > dirty_y1_) dirty_y1_ = y1;
+  }
+
   D& display_;
   u16* buf_;
   u16 w_;
   u16 h_;
-  bool dirty_ = false;
+  i16 dirty_y0_ = 0;
+  i16 dirty_y1_ = -1;
   i16 cx_ = 0;
   i16 cy_ = 0;
   u16 tc_ = 0xFFFF;

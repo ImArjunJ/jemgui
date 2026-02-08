@@ -33,22 +33,23 @@ constexpr u16 blend_rgb565(u16 fg, u16 bg, u8 alpha) {
 }
 
 constexpr u16 darken(u16 c, u8 amount) {
-  u16 r = ((c >> 11) & 0x1F);
-  u16 g = ((c >> 5) & 0x3F);
-  u16 b = (c & 0x1F);
-  r = r > amount / 8 ? r - amount / 8 : 0;
-  g = g > amount / 4 ? g - amount / 4 : 0;
-  b = b > amount / 8 ? b - amount / 8 : 0;
+  u32 r = (c >> 11) & 0x1F;
+  u32 g = (c >> 5) & 0x3F;
+  u32 b = c & 0x1F;
+  u32 inv = 256 - amount;
+  r = r * inv >> 8;
+  g = g * inv >> 8;
+  b = b * inv >> 8;
   return static_cast<u16>((r << 11) | (g << 5) | b);
 }
 
 constexpr u16 lighten(u16 c, u8 amount) {
-  u16 r = ((c >> 11) & 0x1F);
-  u16 g = ((c >> 5) & 0x3F);
-  u16 b = (c & 0x1F);
-  r = r + amount / 8 < 0x1F ? r + amount / 8 : 0x1F;
-  g = g + amount / 4 < 0x3F ? g + amount / 4 : 0x3F;
-  b = b + amount / 8 < 0x1F ? b + amount / 8 : 0x1F;
+  u32 r = (c >> 11) & 0x1F;
+  u32 g = (c >> 5) & 0x3F;
+  u32 b = c & 0x1F;
+  r = r + (0x1F - r) * amount / 255;
+  g = g + (0x3F - g) * amount / 255;
+  b = b + (0x1F - b) * amount / 255;
   return static_cast<u16>((r << 11) | (g << 5) | b);
 }
 

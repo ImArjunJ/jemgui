@@ -73,18 +73,35 @@ int main() {
   canvas<drivers::ili9341> fb(display, framebuf);
   ctx ui(fb);
 
-  bool green_on = false;
-  bool blue_on = false;
-  bool red_on = false;
-  bool blink_enable = false;
-  i16 blink_rate = 5;
-  i16 brightness_pct = 80;
+  bool use_dark = true;
+  bool toggle_a = false;
+  bool toggle_b = true;
+  bool check_a = true;
+  bool check_b = false;
+  bool check_c = true;
+  i16 radio_val = 0;
+  i16 slider_val = 50;
+  i16 slider_b = 25;
+  i16 brightness = 80;
+  bool led_g = false;
+  bool led_b = false;
+  bool led_r = false;
+  bool blink_en = false;
 
   u32 frame = 0;
-  u32 blink_counter = 0;
+  u32 last_tick = millis();
+  u32 blink_ctr = 0;
   bool blink_phase = false;
 
+  float progress_val = 0.0f;
+  bool progress_fwd = true;
+
   while (true) {
+    u32 now = millis();
+    i32 dt = static_cast<i32>(now - last_tick);
+    if (dt > 100) dt = 16;
+    last_tick = now;
+
     input_state input;
     if (touch.touched()) {
       auto tp = touch.read();
@@ -94,32 +111,14 @@ int main() {
       }
     }
 
-    ui.begin_frame(input);
+    ui.begin_frame(input, dt);
 
-    ui.panel_begin("led controller");
-
-    ui.row();
-    ui.toggle("green", green_on);
-    ui.toggle("blue", blue_on);
-    ui.toggle("red", red_on);
-    ui.end();
-
-    ui.toggle("blink all", blink_enable);
-    ui.slider("blink rate", blink_rate, 1, 20);
-    ui.slider("brightness", brightness_pct, 0, 100);
-
-    ui.separator();
+    ui.panel_begin("jemgui demo");
 
     ui.row();
-    if (ui.button("all on")) {
-      green_on = true;
-      blue_on = true;
-      red_on = true;
-    }
-    if (ui.button("all off")) {
-      green_on = false;
-      blue_on = false;
-      red_on = false;
+    if (ui.button(use_dark ? "light" : "dark")) {
+      use_dark = !use_dark;
+      ui.set_theme(use_dark ? themes::dark : themes::light);
     }
     if (ui.button("rotate")) {
       rotation = static_cast<u8>((rotation + 1) & 3);
@@ -129,45 +128,146 @@ int main() {
       fb.reinit();
       ui.recalculate();
     }
+    ui.label_fmt("f:%lu", frame);
     ui.end();
 
     ui.separator();
 
-    ui.label_fmt("frame: %lu  rotation: %u", frame, rotation);
-
+    ui.label("buttons");
     ui.row();
-    ui.progress("brightness", static_cast<float>(brightness_pct) / 100.0f);
+    if (ui.button("click me")) {
+      led_g = !led_g;
+    }
+    ui.button_colored("success", ui.current_theme().success);
+    ui.button_colored("danger", ui.current_theme().danger);
     ui.end();
+
+    ui.separator();
+
+    ui.label("toggles");
+    ui.toggle("enable", toggle_a);
+    ui.toggle("animate", toggle_b);
+
+    ui.separator();
+
+    ui.label("checkboxes");
+    ui.checkbox("option a", check_a);
+    ui.checkbox("option b", check_b);
+    ui.checkbox("option c", check_c);
+
+    ui.separator();
+
+    ui.label("radio");
+    ui.radio("choice 1", radio_val, 0);
+    ui.radio("choice 2", radio_val, 1);
+    ui.radio("choice 3", radio_val, 2);
+
+    ui.separator();
+
+    ui.label("sliders");
+    ui.slider("value", slider_val, 0, 100);
+    ui.slider("speed", slider_b, 0, 50);
+
+    ui.separator();
+
+    ui.label("progress");
+    ui.progress("load", progress_val);
+
+    if (toggle_b) {
+      float step = 0.005f * static_cast<float>(dt);
+      if (progress_fwd) {
+        progress_val += step;
+        if (progress_val >= 1.0f) {
+          progress_val = 1.0f;
+          progress_fwd = false;
+        }
+      } else {
+        progress_val -= step;
+        if (progress_val <= 0.0f) {
+          progress_val = 0.0f;
+          progress_fwd = true;
+        }
+      }
+    }
+
+    ui.separator();
+
+    ui.label("gauge");
+    {
+      i16 gauge_h = 60;
+      ui.spacer(gauge_h);
+
+      auto avail = ui.available();
+      i16 gcx = static_cast<i16>(ui.cursor().x + avail.w / 2);
+      i16 gcy = static_cast<i16>(ui.cursor().y - gauge_h / 2 + 4);
+      i16 outer = 26;
+      i16 inner = 18;
+      float gf = static_cast<float>(slider_val) / 100.0f;
+      ui.gauge(gcx, gcy, outer, inner, gf, ui.current_theme().accent,
+               ui.current_theme().surface_alt);
+
+      char vbuf[8];
+      snprintf(vbuf, sizeof(vbuf), "%d", slider_val);
+      u8 fs = 1;
+      i16 vtw = draw::text_width(vbuf, fs);
+      i16 vth = draw::text_height(fs);
+      jemgui::rect vr = {
+          {static_cast<i16>(gcx - vtw / 2), static_cast<i16>(gcy - vth / 2)},
+          {static_cast<u16>(vtw), static_cast<u16>(vth)}};
+      draw::text_centered(ui.painter(), vr, vbuf, ui.current_theme().text, fs);
+    }
+
+    ui.separator();
+
+    ui.label("badges");
+    ui.row(16);
+    ui.badge("ok", ui.current_theme().success);
+    ui.badge("warn", ui.current_theme().warning);
+    ui.badge("err", ui.current_theme().danger);
+    ui.badge("info", ui.current_theme().accent);
+    ui.end();
+
+    ui.separator();
+
+    ui.label("led control");
+    ui.row();
+    ui.toggle("g", led_g);
+    ui.toggle("b", led_b);
+    ui.toggle("r", led_r);
+    ui.end();
+    ui.toggle("blink", blink_en);
+    ui.slider("bright", brightness, 0, 100);
+
+    ui.separator();
 
     if (input.touch_down) {
       ui.label_fmt("touch: %d, %d", input.touch_pos.x, input.touch_pos.y);
     } else {
       ui.label("touch: --");
     }
+    ui.label_fmt("rot: %u  scale: %d", rotation, ui.scale_value());
 
     ui.panel_end();
 
     ui.end_frame();
     fb.flush();
 
-    if (blink_enable) {
-      blink_counter++;
-      u32 half_period = static_cast<u32>(60 / blink_rate) / 2;
-      if (half_period < 1) half_period = 1;
-      if (blink_counter >= half_period) {
-        blink_counter = 0;
+    if (blink_en) {
+      blink_ctr++;
+      if (blink_ctr >= 15) {
+        blink_ctr = 0;
         blink_phase = !blink_phase;
       }
     } else {
       blink_phase = true;
-      blink_counter = 0;
+      blink_ctr = 0;
     }
 
     bool phase = blink_phase;
-    (green_on && phase) ? led_green.high() : led_green.low();
-    (blue_on && phase) ? led_blue.high() : led_blue.low();
-    (red_on && phase) ? led_red.high() : led_red.low();
+    (led_g && phase) ? led_green.high() : led_green.low();
+    (led_b && phase) ? led_blue.high() : led_blue.low();
+    (led_r && phase) ? led_red.high() : led_red.low();
 
-    frame++;
+    ++frame;
   }
 }

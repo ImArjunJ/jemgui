@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <jemgui/anim.hpp>
 #include <jemgui/color.hpp>
+#include <jemgui/draw.hpp>
 #include <jemgui/hash.hpp>
 #include <jemgui/input.hpp>
 #include <jemgui/layout.hpp>
@@ -19,31 +21,20 @@ class ctx {
  public:
   explicit ctx(P& painter, const theme& t = themes::dark)
       : p_{painter}, theme_{t} {
-    i32 pw = p_.width();
-    i32 ph = p_.height();
-    i32 sx = (pw << 8) / 320;
-    i32 sy = (ph << 8) / 240;
-    scale_ = static_cast<i16>(sx < sy ? sx : sy);
-    if (scale_ < 64) scale_ = 64;
+    recalculate_scale();
   }
 
   void set_theme(const theme& t) { theme_ = t; }
   const theme& current_theme() const { return theme_; }
 
   void recalculate() {
-    i32 pw = p_.width();
-    i32 ph = p_.height();
-    i32 sx = (pw << 8) / 320;
-    i32 sy = (ph << 8) / 240;
-    scale_ = static_cast<i16>(sx < sy ? sx : sy);
-    if (scale_ < 64) scale_ = 64;
-    for (usize i = 0; i < max_scroll_panels; ++i) {
-      scroll_[i] = {};
-    }
+    recalculate_scale();
+    for (usize i = 0; i < max_scroll_panels; ++i) scroll_[i] = {};
   }
 
-  void begin_frame(const input_state& input) {
+  void begin_frame(const input_state& input, i32 dt_ms = 0) {
     input_.update(input);
+    anims_.tick(dt_ms);
     hot_ = 0;
     active_panel_.scroll_idx = -1;
     layout_.reset();
@@ -54,17 +45,22 @@ class ctx {
     root.spacing = s(theme_.spacing);
     layout_.push(root);
 
-    p_.fill_rect(0, 0, static_cast<i16>(p_.width()),
-                 static_cast<i16>(p_.height()), theme_.bg);
+    i16 pw = static_cast<i16>(p_.width());
+    i16 ph = static_cast<i16>(p_.height());
+    i16 edge = static_cast<i16>(s(theme_.padding) + s(theme_.corner_radius));
+    p_.fill_rect(0, 0, pw, edge, theme_.bg);
+    p_.fill_rect(0, static_cast<i16>(ph - edge), pw, edge, theme_.bg);
+    p_.fill_rect(0, edge, edge, static_cast<i16>(ph - 2 * edge), theme_.bg);
+    p_.fill_rect(static_cast<i16>(pw - edge), edge, edge,
+                 static_cast<i16>(ph - 2 * edge), theme_.bg);
   }
 
   void end_frame() {
-    if (!input_.down()) {
-      active_ = 0;
-    }
+    if (!input_.down()) active_ = 0;
   }
 
-  // --- layout ---
+  anim_pool& anims() { return anims_; }
+  const anim_pool& anims() const { return anims_; }
 
   void row(i16 height = 0) {
     i16 h = height > 0 ? s(height) : s(theme_.widget_height);
@@ -91,13 +87,10 @@ class ctx {
   }
 
   void end() {
-    if (layout_.depth > 1) {
-      layout_.pop();
-    }
+    if (layout_.depth > 1) layout_.pop();
   }
 
   void pad(i16 px) { layout_.advance(s(px)); }
-
   void spacer(i16 px) { layout_.advance(s(px)); }
 
   void indent(i16 px) {
@@ -116,15 +109,9 @@ class ctx {
     }
   }
 
-  // --- id stack ---
-
   void push_id(i16 index) { ids_.push(static_cast<id>(index)); }
-
   void push_id(const char* str) { ids_.push(hash_label(str)); }
-
   void pop_id() { ids_.pop(); }
-
-  // --- widgets ---
 
   void label(const char* text) {
     u8 fs = font_size();
@@ -136,6 +123,18 @@ class ctx {
                                   static_cast<i16>(layout_.available_w()))),
                               static_cast<u16>(wh));
     draw::text_left(p_, r, text, theme_.text, fs, s(theme_.padding));
+  }
+
+  void label_colored(const char* text, u16 color) {
+    u8 fs = font_size();
+    i16 tw = draw::text_width(text, fs);
+    i16 th = draw::text_height(fs);
+    i16 wh = std::max(th, s(theme_.widget_height));
+    rect r = layout_.allocate(static_cast<u16>(std::min<i16>(
+                                  tw + s(theme_.padding) * 2,
+                                  static_cast<i16>(layout_.available_w()))),
+                              static_cast<u16>(wh));
+    draw::text_left(p_, r, text, color, fs, s(theme_.padding));
   }
 
   void label_fmt(const char* fmt, ...) {
@@ -153,38 +152,63 @@ class ctx {
     i16 tw = draw::text_width(text, fs);
     i16 h = s(theme_.widget_height);
     i16 w = static_cast<i16>(tw + s(theme_.padding) * 4);
-    if (layout_.top().dir == direction::horizontal) {
+    if (layout_.top().dir == direction::horizontal)
       w = std::min(w, static_cast<i16>(layout_.available_w()));
-    }
     rect r = layout_.allocate(static_cast<u16>(w), static_cast<u16>(h));
 
     bool hovered = input_.down_in(r);
     bool pressed = false;
-
     if (hovered) {
       hot_ = wid;
-      if (input_.pressed_in(r)) {
-        active_ = wid;
-      }
+      if (input_.pressed_in(r)) active_ = wid;
     }
-
     if (active_ == wid && input_.released()) {
-      if (r.contains(input_.pos())) {
-        pressed = true;
-      }
+      if (r.contains(input_.pos())) pressed = true;
       active_ = 0;
     }
 
     u16 bg_color = theme_.accent;
-    if (active_ == wid && hovered) {
+    if (active_ == wid && hovered)
       bg_color = theme_.accent_press;
-    } else if (hot_ == wid) {
+    else if (hot_ == wid)
       bg_color = theme_.accent_hover;
+
+    u16 top_c = lighten(bg_color, 60);
+    u16 bot_c = darken(bg_color, 40);
+    draw::rounded_rect_gradient_v(p_, r, s(theme_.corner_radius), top_c, bot_c);
+    draw::text_centered(p_, r, text, theme_.text, fs);
+    return pressed;
+  }
+
+  bool button_colored(const char* text, u16 color) {
+    id wid = ids_.make(text);
+    u8 fs = font_size();
+    i16 tw = draw::text_width(text, fs);
+    i16 h = s(theme_.widget_height);
+    i16 w = static_cast<i16>(tw + s(theme_.padding) * 4);
+    if (layout_.top().dir == direction::horizontal)
+      w = std::min(w, static_cast<i16>(layout_.available_w()));
+    rect r = layout_.allocate(static_cast<u16>(w), static_cast<u16>(h));
+
+    bool hovered = input_.down_in(r);
+    bool pressed = false;
+    if (hovered) {
+      hot_ = wid;
+      if (input_.pressed_in(r)) active_ = wid;
+    }
+    if (active_ == wid && input_.released()) {
+      if (r.contains(input_.pos())) pressed = true;
+      active_ = 0;
     }
 
-    draw::rounded_rect_fill(p_, r, s(theme_.corner_radius), bg_color);
-    draw::text_centered(p_, r, text, theme_.text, fs);
+    u16 bg = color;
+    if (active_ == wid && hovered)
+      bg = darken(color, 80);
+    else if (hot_ == wid)
+      bg = lighten(color, 50);
 
+    draw::rounded_rect_fill(p_, r, s(theme_.corner_radius), bg);
+    draw::text_centered(p_, r, text, theme_.text, fs);
     return pressed;
   }
 
@@ -199,9 +223,7 @@ class ctx {
     rect r = layout_.allocate(static_cast<u16>(total_w), static_cast<u16>(h));
 
     bool toggled = false;
-    if (input_.pressed_in(r)) {
-      active_ = wid;
-    }
+    if (input_.pressed_in(r)) active_ = wid;
     if (active_ == wid && input_.released()) {
       if (r.contains(input_.pos())) {
         value = !value;
@@ -209,9 +231,7 @@ class ctx {
       }
       active_ = 0;
     }
-    if (input_.down_in(r)) {
-      hot_ = wid;
-    }
+    if (input_.down_in(r)) hot_ = wid;
 
     draw::text_left(p_, r, text, theme_.text, fs, s(theme_.padding));
 
@@ -221,17 +241,118 @@ class ctx {
                     {static_cast<u16>(track_w), static_cast<u16>(track_h)}};
     i16 track_radius = static_cast<i16>(track_h / 2);
 
-    u16 track_color = value ? theme_.accent : theme_.surface_alt;
+    id anim_id = mix_id(wid, 0xA1);
+    anims_.ensure(anim_id, value ? 256 : 0, 180, ease::out_cubic);
+    i32 frac = anims_.get(anim_id, value ? 256 : 0);
+
+    u16 track_color = blend_rgb565(theme_.accent, theme_.surface_alt,
+                                   static_cast<u8>(frac > 255 ? 255 : frac));
     draw::rounded_rect_fill(p_, track_r, track_radius, track_color);
     draw::rounded_rect_outline(p_, track_r, track_radius, theme_.border);
 
-    i16 knob_r = static_cast<i16>(track_h / 2 - 2);
-    i16 knob_x = value ? static_cast<i16>(track_x + track_w - track_h / 2)
-                       : static_cast<i16>(track_x + track_h / 2);
+    i16 off_x = static_cast<i16>(track_x + track_h / 2);
+    i16 on_x = static_cast<i16>(track_x + track_w - track_h / 2);
+    i16 knob_x = static_cast<i16>(off_x + ((on_x - off_x) * frac >> 8));
     i16 knob_y = static_cast<i16>(track_y + track_h / 2);
+    i16 knob_r = static_cast<i16>(track_h / 2 - 2);
     p_.fill_circle(knob_x, knob_y, knob_r, theme_.text);
 
     return toggled;
+  }
+
+  bool checkbox(const char* text, bool& value) {
+    id wid = ids_.make(text);
+    u8 fs = font_size();
+    i16 h = s(theme_.widget_height);
+    i16 box_sz = s(14);
+    i16 tw = draw::text_width(text, fs);
+    i16 total_w = static_cast<i16>(box_sz + tw + s(theme_.padding) * 3);
+    rect r = layout_.allocate(static_cast<u16>(total_w), static_cast<u16>(h));
+
+    bool toggled = false;
+    if (input_.pressed_in(r)) active_ = wid;
+    if (active_ == wid && input_.released()) {
+      if (r.contains(input_.pos())) {
+        value = !value;
+        toggled = true;
+      }
+      active_ = 0;
+    }
+    if (input_.down_in(r)) hot_ = wid;
+
+    i16 bx = static_cast<i16>(r.x() + s(theme_.padding));
+    i16 by = static_cast<i16>(r.y() + (h - box_sz) / 2);
+    rect box_r = {{bx, by},
+                  {static_cast<u16>(box_sz), static_cast<u16>(box_sz)}};
+
+    id anim_id = mix_id(wid, 0xCB);
+    anims_.ensure(anim_id, value ? 256 : 0, 150, ease::out_cubic);
+    i32 frac = anims_.get(anim_id, value ? 256 : 0);
+
+    u16 box_bg = blend_rgb565(theme_.accent, theme_.surface_alt,
+                              static_cast<u8>(frac > 255 ? 255 : frac));
+    draw::rounded_rect_fill(p_, box_r, s(2), box_bg);
+    draw::rounded_rect_outline(p_, box_r, s(2), theme_.border);
+
+    if (frac > 32) {
+      i16 cx = static_cast<i16>(bx + box_sz / 2);
+      i16 cy = static_cast<i16>(by + box_sz / 2);
+      i16 mark = static_cast<i16>((box_sz / 4) * frac / 256);
+      if (mark < 1) mark = 1;
+      i16 x1 = static_cast<i16>(cx - mark);
+      i16 x2 = static_cast<i16>(cx + mark);
+      i16 y1 = static_cast<i16>(cy - mark);
+      i16 y2 = static_cast<i16>(cy + mark);
+      p_.hline(x1, cy, static_cast<i16>(x2 - x1 + 1), theme_.text);
+      p_.vline(cx, y1, static_cast<i16>(y2 - y1 + 1), theme_.text);
+    }
+
+    rect text_r = {{static_cast<i16>(bx + box_sz + s(theme_.padding)), r.y()},
+                   {static_cast<u16>(tw), static_cast<u16>(h)}};
+    draw::text_left(p_, text_r, text, theme_.text, fs, 0);
+    return toggled;
+  }
+
+  bool radio(const char* text, i16& current_val, i16 this_val) {
+    id wid = ids_.make(text);
+    u8 fs = font_size();
+    i16 h = s(theme_.widget_height);
+    i16 circle_r = s(6);
+    i16 tw = draw::text_width(text, fs);
+    i16 total_w = static_cast<i16>(circle_r * 2 + tw + s(theme_.padding) * 3);
+    rect r = layout_.allocate(static_cast<u16>(total_w), static_cast<u16>(h));
+
+    bool changed = false;
+    if (input_.pressed_in(r)) active_ = wid;
+    if (active_ == wid && input_.released()) {
+      if (r.contains(input_.pos()) && current_val != this_val) {
+        current_val = this_val;
+        changed = true;
+      }
+      active_ = 0;
+    }
+    if (input_.down_in(r)) hot_ = wid;
+
+    bool selected = current_val == this_val;
+    i16 cx = static_cast<i16>(r.x() + s(theme_.padding) + circle_r);
+    i16 cy = static_cast<i16>(r.y() + h / 2);
+
+    draw::circle_outline(p_, cx, cy, circle_r, theme_.border);
+
+    id anim_id = mix_id(wid, 0xD1);
+    anims_.ensure(anim_id, selected ? 256 : 0, 150, ease::out_cubic);
+    i32 frac = anims_.get(anim_id, selected ? 256 : 0);
+
+    if (frac > 32) {
+      i16 inner_r = static_cast<i16>((circle_r - 3) * frac / 256);
+      if (inner_r < 1) inner_r = 1;
+      p_.fill_circle(cx, cy, inner_r, theme_.accent);
+    }
+
+    rect text_r = {{static_cast<i16>(cx + circle_r + s(theme_.padding)), r.y()},
+                   {static_cast<u16>(tw), static_cast<u16>(h)}};
+    draw::text_left(p_, text_r, text, theme_.text, fs, 0);
+    return changed;
   }
 
   bool slider(const char* text, i16& value, i16 min_val, i16 max_val) {
@@ -252,10 +373,7 @@ class ctx {
                     {static_cast<u16>(track_w), static_cast<u16>(track_h)}};
 
     bool changed = false;
-
-    if (input_.pressed_in(r)) {
-      active_ = wid;
-    }
+    if (input_.pressed_in(r)) active_ = wid;
     if (active_ == wid) {
       if (input_.down()) {
         i32 rel = input_.pos().x - track_x;
@@ -267,22 +385,23 @@ class ctx {
           changed = true;
         }
       }
-      if (!input_.down()) {
-        active_ = 0;
-      }
+      if (!input_.down()) active_ = 0;
     }
-    if (input_.down_in(r)) {
-      hot_ = wid;
-    }
+    if (input_.down_in(r)) hot_ = wid;
 
     draw::text_left(p_, r, text, theme_.text, fs, s(theme_.padding));
-
     draw::rounded_rect_fill(p_, track_r, s(3), theme_.surface_alt);
 
     i32 range = max_val - min_val;
-    i32 fill_w =
+    i32 target_fill =
         range > 0 ? static_cast<i32>(value - min_val) * track_w / range : 0;
-    fill_w = std::clamp<i32>(fill_w, 0, track_w);
+    target_fill = std::clamp<i32>(target_fill, 0, track_w);
+
+    id fill_anim = mix_id(wid, 0xF1);
+    anims_.ensure(fill_anim, static_cast<i32>(target_fill), 120,
+                  ease::out_cubic);
+    i32 fill_w =
+        std::clamp<i32>(anims_.get(fill_anim, target_fill), 0, track_w);
 
     if (fill_w > 0) {
       rect fill_r = {{track_x, track_y},
@@ -293,9 +412,19 @@ class ctx {
     i16 thumb_x = static_cast<i16>(track_x + fill_w);
     i16 thumb_y = static_cast<i16>(r.y() + h / 2);
     i16 thumb_r = s(5);
-    u16 thumb_color = (active_ == wid) ? theme_.accent_press : theme_.accent;
-    p_.fill_circle(thumb_x, thumb_y, thumb_r, thumb_color);
 
+    id halo_anim = mix_id(wid, 0xF2);
+    anims_.ensure(halo_anim, (active_ == wid) ? 256 : 0, 150, ease::out_quad);
+    i32 halo_frac = anims_.get(halo_anim, 0);
+    if (halo_frac > 16) {
+      i16 halo_r = static_cast<i16>(thumb_r + s(3) * halo_frac / 256);
+      u8 halo_a = static_cast<u8>(80 * halo_frac / 256);
+      u16 halo_c = blend_rgb565(theme_.accent, theme_.bg, halo_a);
+      p_.fill_circle(thumb_x, thumb_y, halo_r, halo_c);
+    }
+
+    u16 thumb_c = (active_ == wid) ? theme_.accent_press : theme_.accent;
+    p_.fill_circle(thumb_x, thumb_y, thumb_r, thumb_c);
     return changed;
   }
 
@@ -327,6 +456,36 @@ class ctx {
     }
   }
 
+  void gauge(i16 cx, i16 cy, i16 outer_r, i16 inner_r, float fraction,
+             u16 fill_color, u16 track_color) {
+    i16 start_deg = 135;
+    i16 end_deg = 45;
+    draw::arc_fill(p_, cx, cy, outer_r, inner_r, start_deg, end_deg,
+                   track_color);
+
+    float f = std::clamp(fraction, 0.0f, 1.0f);
+    i16 sweep = 270;
+    i16 fill_end = static_cast<i16>(
+        start_deg + static_cast<i16>(static_cast<float>(sweep) * f));
+    if (fill_end >= 360) fill_end = static_cast<i16>(fill_end - 360);
+    if (f > 0.001f)
+      draw::arc_fill(p_, cx, cy, outer_r, inner_r, start_deg, fill_end,
+                     fill_color);
+  }
+
+  void badge(const char* text, u16 color) {
+    u8 fs = font_size();
+    i16 tw = draw::text_width(text, fs);
+    i16 th = draw::text_height(fs);
+    i16 pad_h = s(2);
+    i16 pad_w = s(6);
+    i16 bw = static_cast<i16>(tw + pad_w * 2);
+    i16 bh = static_cast<i16>(th + pad_h * 2);
+    rect r = layout_.allocate(static_cast<u16>(bw), static_cast<u16>(bh));
+    draw::rounded_rect_fill(p_, r, static_cast<i16>(bh / 2), color);
+    draw::text_centered(p_, r, text, theme_.text, fs);
+  }
+
   void separator() {
     i16 sp = s(theme_.spacing);
     layout_.advance(sp);
@@ -336,27 +495,32 @@ class ctx {
     layout_.advance(sp);
   }
 
-  void panel_begin(const char* title = nullptr) {
-    i16 pad = s(theme_.padding);
+  void panel_begin(const char* title = nullptr, bool with_shadow = false) {
+    i16 pad_val = s(theme_.padding);
     u16 w = layout_.available_w();
     u16 h = layout_.available_h();
     rect r = layout_.allocate(w, h);
+
+    if (with_shadow) {
+      draw::shadow(p_, r, s(theme_.corner_radius), theme_.bg, 3, s(2), s(2));
+    }
+
     draw::rounded_rect_fill(p_, r, s(theme_.corner_radius), theme_.surface);
     draw::rounded_rect_outline(p_, r, s(theme_.corner_radius), theme_.border);
 
-    rect inner = r.shrink(pad);
+    rect inner = r.shrink(pad_val);
 
     if (title) {
       u8 fs = font_size();
       i16 th = draw::text_height(fs);
-      i16 title_h = static_cast<i16>(th + pad);
+      i16 title_h = static_cast<i16>(th + pad_val);
       rect title_r = {inner.pos, {inner.w(), static_cast<u16>(title_h)}};
       draw::text_left(p_, title_r, title, theme_.text, fs, 0);
       p_.hline(inner.x(), static_cast<i16>(inner.y() + title_h),
                static_cast<i16>(inner.w()), theme_.border);
-      inner.pos.y = static_cast<i16>(inner.y() + title_h + pad);
+      inner.pos.y = static_cast<i16>(inner.y() + title_h + pad_val);
       inner.size.h = static_cast<u16>(
-          inner.h() > title_h + pad ? inner.h() - title_h - pad : 0);
+          inner.h() > title_h + pad_val ? inner.h() - title_h - pad_val : 0);
     }
 
     id pid = title ? ids_.make(title) : ids_.make("__panel__");
@@ -372,16 +536,12 @@ class ctx {
       content_bounds.size.w = static_cast<u16>(
           inner.w() > bar_space ? inner.w() - bar_space : inner.w());
     }
-
     content_bounds.size.h = 4096;
 
     vec2 cursor = content_bounds.pos;
-    if (si >= 0) {
-      cursor.y = static_cast<i16>(cursor.y - scroll_[si].offset);
-    }
+    if (si >= 0) cursor.y = static_cast<i16>(cursor.y - scroll_[si].offset);
 
     p_.set_clip(inner);
-
     layout_.push({
         .bounds = content_bounds,
         .cursor = cursor,
@@ -409,7 +569,14 @@ class ctx {
             active_panel_.clip.contains(input_.prev_pos())) {
           i16 dy = static_cast<i16>(input_.pos().y - input_.prev_pos().y);
           se.offset = static_cast<i16>(se.offset - dy);
+          se.velocity = static_cast<i16>(-dy * 4);
         }
+      } else if (!input_.down() && se.velocity != 0) {
+        se.offset = static_cast<i16>(se.offset + se.velocity / 4);
+        if (se.velocity > 0)
+          se.velocity = static_cast<i16>(se.velocity - 1);
+        else if (se.velocity < 0)
+          se.velocity = static_cast<i16>(se.velocity + 1);
       }
 
       if (se.offset < 0) se.offset = 0;
@@ -427,7 +594,11 @@ class ctx {
                                            (bar_h - thumb_h) / max_scroll);
         p_.fill_rect(bar_x, active_panel_.clip.y(), bar_w, bar_h,
                      theme_.surface_alt);
-        p_.fill_rect(bar_x, thumb_y, bar_w, thumb_h, theme_.border);
+        draw::rounded_rect_fill(
+            p_,
+            rect{{bar_x, thumb_y},
+                 {static_cast<u16>(bar_w), static_cast<u16>(thumb_h)}},
+            static_cast<i16>(bar_w / 2), theme_.border);
       }
 
       p_.clear_clip();
@@ -441,15 +612,12 @@ class ctx {
     for (i16 row = 0; row < static_cast<i16>(h); ++row) {
       for (i16 col = 0; col < static_cast<i16>(w); ++col) {
         u16 px = bitmap[row * w + col];
-        if (px != 0) {
+        if (px != 0)
           p_.pixel(static_cast<i16>(r.x() + col), static_cast<i16>(r.y() + row),
                    px);
-        }
       }
     }
   }
-
-  // --- queries ---
 
   bool is_hot(id widget) const { return hot_ == widget; }
   bool is_active(id widget) const { return active_ == widget; }
@@ -459,8 +627,18 @@ class ctx {
   }
   i16 scale_value() const { return scale_; }
   const input_cache& input() const { return input_; }
+  P& painter() { return p_; }
 
  private:
+  void recalculate_scale() {
+    i32 pw = p_.width();
+    i32 ph = p_.height();
+    i32 sx = (pw << 8) / 320;
+    i32 sy = (ph << 8) / 240;
+    scale_ = static_cast<i16>(sx < sy ? sx : sy);
+    if (scale_ < 64) scale_ = 64;
+  }
+
   i16 s(i16 value) const { return scale(value, scale_); }
 
   u8 font_size() const {
@@ -474,6 +652,7 @@ class ctx {
     id pid = 0;
     i16 offset = 0;
     i16 content_h = 0;
+    i16 velocity = 0;
   };
 
   struct panel_info {
@@ -500,6 +679,7 @@ class ctx {
   input_cache input_;
   layout_stack layout_;
   id_stack ids_;
+  anim_pool anims_;
   id hot_ = 0;
   id active_ = 0;
   i16 scale_ = 256;
