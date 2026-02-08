@@ -486,6 +486,218 @@ class ctx {
     draw::text_centered(p_, r, text, theme_.text, fs);
   }
 
+  void header(const char* text, u16 bg_color = 0) {
+    u8 fs = font_size();
+    i16 h = static_cast<i16>(s(theme_.widget_height) + s(4));
+    u16 full_w = layout_.available_w();
+    rect r = layout_.allocate(full_w, static_cast<u16>(h));
+    u16 bg = bg_color != 0 ? bg_color : theme_.accent;
+    draw::rounded_rect_fill(p_, r, s(theme_.corner_radius), bg);
+    draw::text_centered(p_, r, text, theme_.text, fs);
+  }
+
+  bool tile(const char* text, u16 color, u16 tile_w, u16 tile_h) {
+    id wid = ids_.make(text);
+    u8 fs = font_size();
+    rect r = layout_.allocate(tile_w, tile_h);
+
+    bool hovered = input_.down_in(r);
+    bool pressed = false;
+    if (hovered) {
+      hot_ = wid;
+      if (input_.pressed_in(r)) active_ = wid;
+    }
+    if (active_ == wid && input_.released()) {
+      if (r.contains(input_.pos())) pressed = true;
+      active_ = 0;
+    }
+
+    u16 bg = color;
+    if (active_ == wid && hovered)
+      bg = darken(color, 60);
+    else if (hot_ == wid)
+      bg = lighten(color, 40);
+
+    draw::rounded_rect_fill(p_, r, s(theme_.corner_radius + 2), bg);
+    draw::text_centered(p_, r, text, theme_.text, fs);
+    return pressed;
+  }
+
+  void stat_card(const char* label, const char* value, u16 accent_color) {
+    u8 fs = font_size();
+    u8 vfs = static_cast<u8>(fs < 2 ? 2 : fs);
+    i16 lh = draw::text_height(fs);
+    i16 vh = draw::text_height(vfs);
+    i16 pad = s(theme_.padding);
+    i16 h = static_cast<i16>(lh + vh + pad * 2 + s(2));
+    u16 w = layout_.available_w();
+    rect r = layout_.allocate(w, static_cast<u16>(h));
+
+    draw::rounded_rect_fill(p_, r, s(theme_.corner_radius), theme_.surface_alt);
+
+    i16 bar_w = s(3);
+    p_.fill_rect(r.x(), static_cast<i16>(r.y() + s(2)), bar_w,
+                 static_cast<i16>(r.h() - s(4)), accent_color);
+
+    i16 lx = static_cast<i16>(r.x() + bar_w + pad);
+    u16 tw = static_cast<u16>(r.w() - bar_w - pad * 2);
+
+    rect label_r = {{lx, static_cast<i16>(r.y() + pad)},
+                    {tw, static_cast<u16>(lh)}};
+    draw::text_left(p_, label_r, label, theme_.text_dim, fs, 0);
+
+    rect val_r = {{lx, static_cast<i16>(r.y() + pad + lh + s(2))},
+                  {tw, static_cast<u16>(vh)}};
+    draw::text_left(p_, val_r, value, accent_color, vfs, 0);
+  }
+
+  bool list_item(const char* text, bool selected) {
+    id wid = ids_.make(text);
+    u8 fs = font_size();
+    i16 h = s(theme_.widget_height);
+    u16 full_w = layout_.available_w();
+    rect r = layout_.allocate(full_w, static_cast<u16>(h));
+
+    bool pressed = false;
+    if (input_.pressed_in(r)) active_ = wid;
+    if (active_ == wid && input_.released()) {
+      if (r.contains(input_.pos())) pressed = true;
+      active_ = 0;
+    }
+    if (input_.down_in(r)) hot_ = wid;
+
+    u16 bg = selected ? theme_.accent
+                      : (hot_ == wid ? theme_.surface_alt : theme_.surface);
+    draw::rounded_rect_fill(p_, r, s(2), bg);
+    draw::text_left(p_, r, text, theme_.text, fs, s(theme_.padding));
+    return pressed;
+  }
+
+  bool spinner(const char* label, i16& value, i16 min_val, i16 max_val,
+               i16 step = 1) {
+    id wid = ids_.make(label);
+    u8 fs = font_size();
+    i16 h = s(theme_.widget_height);
+    u16 full_w = layout_.available_w();
+    rect r = layout_.allocate(full_w, static_cast<u16>(h));
+
+    i16 tw = draw::text_width(label, fs);
+    i16 label_w = static_cast<i16>(tw + s(theme_.padding) * 2);
+    i16 btn_w = h;
+
+    rect minus_r = {{static_cast<i16>(r.x() + label_w), r.y()},
+                    {static_cast<u16>(btn_w), static_cast<u16>(h)}};
+    rect plus_r = {{static_cast<i16>(r.right() - btn_w), r.y()},
+                   {static_cast<u16>(btn_w), static_cast<u16>(h)}};
+    rect val_r = {
+        {static_cast<i16>(minus_r.right()), r.y()},
+        {static_cast<u16>(plus_r.x() - minus_r.right()), static_cast<u16>(h)}};
+
+    bool changed = false;
+
+    id minus_id = mix_id(wid, 0xE0);
+    if (input_.pressed_in(minus_r)) active_ = minus_id;
+    if (active_ == minus_id && input_.released()) {
+      if (minus_r.contains(input_.pos()) && value > min_val) {
+        value = static_cast<i16>(value - step);
+        if (value < min_val) value = min_val;
+        changed = true;
+      }
+      active_ = 0;
+    }
+
+    id plus_id = mix_id(wid, 0xE1);
+    if (input_.pressed_in(plus_r)) active_ = plus_id;
+    if (active_ == plus_id && input_.released()) {
+      if (plus_r.contains(input_.pos()) && value < max_val) {
+        value = static_cast<i16>(value + step);
+        if (value > max_val) value = max_val;
+        changed = true;
+      }
+      active_ = 0;
+    }
+
+    draw::text_left(p_, r, label, theme_.text, fs, s(theme_.padding));
+
+    u16 minus_bg =
+        (active_ == minus_id) ? theme_.accent_press : theme_.surface_alt;
+    draw::rounded_rect_fill(p_, minus_r, s(2), minus_bg);
+    draw::text_centered(p_, minus_r, "-", theme_.text, fs);
+
+    u16 plus_bg =
+        (active_ == plus_id) ? theme_.accent_press : theme_.surface_alt;
+    draw::rounded_rect_fill(p_, plus_r, s(2), plus_bg);
+    draw::text_centered(p_, plus_r, "+", theme_.text, fs);
+
+    draw::rounded_rect_fill(p_, val_r, 0, theme_.surface);
+    draw::rounded_rect_outline(p_, val_r, 0, theme_.border);
+    char vbuf[16];
+    snprintf(vbuf, sizeof(vbuf), "%d", value);
+    draw::text_centered(p_, val_r, vbuf, theme_.text, fs);
+
+    return changed;
+  }
+
+  bool button_fill(const char* text) {
+    id wid = ids_.make(text);
+    u8 fs = font_size();
+    i16 h = s(theme_.widget_height);
+    u16 w = layout_.available_w();
+    rect r = layout_.allocate(w, static_cast<u16>(h));
+
+    bool hovered = input_.down_in(r);
+    bool pressed = false;
+    if (hovered) {
+      hot_ = wid;
+      if (input_.pressed_in(r)) active_ = wid;
+    }
+    if (active_ == wid && input_.released()) {
+      if (r.contains(input_.pos())) pressed = true;
+      active_ = 0;
+    }
+
+    u16 bg_color = theme_.accent;
+    if (active_ == wid && hovered)
+      bg_color = theme_.accent_press;
+    else if (hot_ == wid)
+      bg_color = theme_.accent_hover;
+
+    u16 top_c = lighten(bg_color, 60);
+    u16 bot_c = darken(bg_color, 40);
+    draw::rounded_rect_gradient_v(p_, r, s(theme_.corner_radius), top_c, bot_c);
+    draw::text_centered(p_, r, text, theme_.text, fs);
+    return pressed;
+  }
+
+  bool button_fill_colored(const char* text, u16 color) {
+    id wid = ids_.make(text);
+    u8 fs = font_size();
+    i16 h = s(theme_.widget_height);
+    u16 w = layout_.available_w();
+    rect r = layout_.allocate(w, static_cast<u16>(h));
+
+    bool hovered = input_.down_in(r);
+    bool pressed = false;
+    if (hovered) {
+      hot_ = wid;
+      if (input_.pressed_in(r)) active_ = wid;
+    }
+    if (active_ == wid && input_.released()) {
+      if (r.contains(input_.pos())) pressed = true;
+      active_ = 0;
+    }
+
+    u16 bg = color;
+    if (active_ == wid && hovered)
+      bg = darken(color, 80);
+    else if (hot_ == wid)
+      bg = lighten(color, 50);
+
+    draw::rounded_rect_fill(p_, r, s(theme_.corner_radius), bg);
+    draw::text_centered(p_, r, text, theme_.text, fs);
+    return pressed;
+  }
+
   void separator() {
     i16 sp = s(theme_.spacing);
     layout_.advance(sp);
